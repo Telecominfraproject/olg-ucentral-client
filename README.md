@@ -1,114 +1,145 @@
-# uCentral Client Daemon (`TIP-olg-ucentral-client`)
+# TIP-olg-ucentral-client
 
-The uCentral client is a lightweight, Go-based gateway daemon that bridges a cloud management platform (via the uCentral WebSocket/JSON-RPC 2.0 protocol) with local device microservices using a local **NATS message bus**.
+`TIP-olg-ucentral-client` is a Go daemon that acts as a secure Cloud Gateway bridging the OpenWiFi Cloud Controller (via WebSocket/JSON-RPC 2.0 mTLS) and local device microservices using a local **NATS message bus**.
 
----
+The default mode relies on strict TLS and NKey validation for production security, but supports an explicit `allow_insecure_local_dev` flag for CI and local development.
 
-## 1. Quick Start
+## What this client does
+* Loads runtime settings from `config.json`.
+* Establishes a strict mTLS WebSocket connection to the OpenWiFi Cloud Controller.
+* Connects to the local NATS message bus.
+* Subscribes to the `result.vyos` (or configured target) topic to handle asynchronous downstream replies.
+* Translates incoming OpenWiFi JSON-RPC requests into standardized NATS envelopes.
+* Publishes configuration payloads to `cmd.configure.vyos`.
+* Publishes operational actions to `cmd.action.vyos.<action>`.
+* Maintains strict payload size limits (e.g., 10MB configure limit) to prevent memory exhaustion.
+* Maintains an active state machine lock for heavy actions (like `upgrade` or `reboot`) to prevent conflicting concurrent state changes.
+* Manages request timeouts based on configurable environment variables.
+* Caches completed transaction responses for a configurable TTL so duplicate requests can be safely replayed without re-executing the downstream operation.
+* Pushes standard telemetry directly from NATS to the Cloud Controller (To be implemented).
 
-### 1.1 Prerequisites
-*   Go (version 1.20 or later)
-*   A local NATS broker configured strictly for **TLS 1.3** and **NKey/JWT Authentication**. (Plaintext connections and insecure `nats://` URLs are architecturally prohibited by the daemon).
-    *   You must generate a valid CA certificate (`ca.pem`) and a NATS credential file (`nats.creds`) and map them in your `config.json` before the daemon will start.
+## Configuration
+The client uses JSON as the runtime source of truth.
 
-### 1.2 Build & Run
-1.  Initialize Go dependencies:
-    ```bash
-    go mod tidy
-    ```
-2.  Build the daemon binary:
-    ```bash
-    go build -o ucentral-client ./cmd/ucentral-client
-    ```
-3.  Run the client:
-    ```bash
-    ./ucentral-client -config config.json
-    ```
+Default config path:
+`config.json`
 
----
+Config path resolution:
+1. The path supplied with `-config`.
+2. `config.json` when `-config` is omitted.
 
-## 2. Configuration Schema (`config.json`)
+Example config file:
+`config.example.json`
+*(Note: This file is provided purely to illustrate the structural schema of the configuration. It contains placeholder values that will fail strict validation out-of-the-box. You must configure it with consistent credentials and network schemes for your specific environment.)*
 
-```json
-{
-  "serial": "00:11:22:33:44:55",
-  "cloud": {
-    "url": "wss://cloud.gateway.example.com:15002",
-    "connect_timeout_seconds": 10,
-    "write_timeout_seconds": 10,
-    "ping_interval_seconds": 30,
-    "pong_timeout_seconds": 60,
-    "stable_session_threshold_seconds": 300,
-    "compression_threshold_bytes": 2048,
-    "tls": {
-      "ca_file": "/etc/ucentral/cloud-ca.pem",
-      "client_cert_file": "/etc/ucentral/cloud-cert.pem",
-      "client_key_file": "/etc/ucentral/cloud-key.pem",
-      "server_name": "cloud.gateway.example.com"
-    }
-  },
-  "nats": {
-    "servers": ["tls://127.0.0.1:4222"],
-    "credentials_file": "/etc/ucentral/nats.creds",
-    "ca_file": "/etc/ucentral/ca.pem",
-    "target": "vyos"
-  },
-  "queues": {
-    "ws_writer_capacity": 500,
-    "emergency_capacity": 100,
-    "nats_publish_capacity": 100,
-    "command_result_capacity": 50,
-    "telemetry_capacity": 500,
-    "max_concurrent_requests": 100
-  }
-}
+Important rule:
+- Environment variables override operational timeouts, payload limits, and cache TTLs. A complete list of all supported operational variables and their defaults is documented in the provided `.env.example` file.
+- `config.json` dictates network routes, queue capacities, TLS paths, and the device serial number.
+
+The agent must not hardcode Cloud URLs, NATS servers, or TLS paths.
+
+mTLS enforcement:
+By default, the client enforces strict TLS on the Cloud connection requiring `ca_file`, `client_cert_file`, and `client_key_file` to be specified and cryptographically valid.
+
+## Setup Instructions
+To successfully configure and connect the client to an OpenWiFi Cloud Controller:
+
+1. **Obtain mTLS Certificates:** You must provision the device with a valid `cert.pem` and `key.pem` signed by the Cloud's operational Certificate Authority. You will also need the public Root CA bundle (`ca.pem` or system certificates).
+2. **Set the Target URL:** In `config.json`, configure the `cloud.url` to point to the Cloud Controller's WebSocket port (typically `15002`, not `443`), for example: `wss://openwifi.example.com:15002`.
+3. **Configure the Identity:** The configured `serial` in `config.json` must match the device identity expected by the OpenWiFi Cloud Controller. Where the Controller binds the device identity to the client certificate CN, these values must match.
+4. **Start the Local Bus:** Ensure a local NATS server is running and accessible.
+   * **Production:** Must use secure `tls://...` connections with a valid `credentials_file` and `ca_file`.
+   * **Local/CI Development:** Can use plaintext `nats://127.0.0.1:4222` provided `"allow_insecure_local_dev": true` is explicitly set in the configuration.
+5. **Run the Daemon:** Start the client using `go run ./cmd/ucentral-client -config ./config.json`.
+
+## Local state
+The runtime config is JSON, and local persistent state (like the active state lock) is managed by an `OperationStore` disk backend, ensuring robust state recovery after restarts and mitigating stale locks.
+
+## Minimal repository layout
+```
+TIP-olg-ucentral-client/
+  README.md
+  SPEC.md
+  config.example.json
+  .env.example
+  go.mod
+
+  cmd/
+    ucentral-client/
+      main.go
+      handler.go
+      main_test.go
+      handler_test.go
+
+  pkg/
+    config/
+      config.go
+    contracts/
+      enums.go
+      rpc.go
+    nats/
+      client.go
+    queues/
+      scheduler.go
+    reqmgr/
+      manager.go
+      cache.go
+      disk_store.go
+    websocket/
+      client.go
+
+  tests/
+    integration_test.go
+    system_e2e/
+      system_test.go
 ```
 
----
-
-## 3. Environment Variables
-
-The daemon utilizes container environment variables to configure operational timeouts and cache durations safely. All durations must be specified in valid Go duration syntax (e.g., `5s`, `1m30s`, `1h`). If an environment variable is omitted, the daemon uses the default value. If a variable is malformed or zero/negative, the daemon triggers a fatal startup error.
-
-**Timeouts:**
-*   `OLG_TIMEOUT_DISPATCH` (Default: `5s`): Bounded timeout for the local preparation and NATS dispatch phases.
-*   `OLG_TIMEOUT_CONFIGURE` (Default: `30s`): Maximum downstream response wait time for `configure`.
-*   `OLG_TIMEOUT_ACTION_EXTENDED` (Default: `120s`): Extended response wait time for heavy actions (`upgrade`, `certupdate`, `script`, `trace`).
-*   `OLG_TIMEOUT_ACTION_DEFAULT` (Default: `60s`): Maximum downstream response wait time for all other standard actions (e.g., `ping`, `reboot`, `factory`).
-
-**Cache TTLs:**
-*   `OLG_CACHE_TTL_DEFAULT` (Default: `2m`): TTL for read-only diagnostics (`ping`, `trace`, `telemetry`).
-*   `OLG_CACHE_TTL_CONFIGURE` (Default: `5m`): TTL for `configure`.
-*   `OLG_CACHE_TTL_LEDS` (Default: `5m`): TTL for `leds`.
-*   `OLG_CACHE_TTL_REBOOT` (Default: `10m`): TTL for `reboot`.
-*   `OLG_CACHE_TTL_REMOTE_ACCESS` (Default: `10m`): TTL for `rtty`.
-*   `OLG_CACHE_TTL_FACTORY` (Default: `30m`): TTL for `factory`.
-*   `OLG_CACHE_TTL_CERTUPDATE` (Default: `30m`): TTL for `certupdate`.
-*   `OLG_CACHE_TTL_REENROLL` (Default: `30m`): TTL for `reenroll`.
-*   `OLG_CACHE_TTL_SCRIPT` (Default: `30m`): TTL for `script`.
-*   `OLG_CACHE_TTL_UPGRADE` (Default: `60m`): TTL for `upgrade` (measured from completion).
-
-**Payload Size Limits (in bytes):**
-*   `OLG_PAYLOAD_LIMIT_ABSOLUTE` (Default: `12582912` / `12MB`): Absolute transport boundary size limit. Incoming frames exceeding this length are rejected immediately before any allocations or parsing.
-*   `OLG_PAYLOAD_LIMIT_CONFIGURE` (Default: `10485760` / `10MB`): Maximum permitted payload size for `configure` methods.
-*   `OLG_PAYLOAD_LIMIT_CERTUPDATE` (Default: `2097152` / `2MB`): Maximum permitted payload size for `certupdate` methods.
-*   `OLG_PAYLOAD_LIMIT_SCRIPT` (Default: `1048576` / `1MB`): Maximum permitted payload size for `script` methods.
-*   `OLG_PAYLOAD_LIMIT_DEFAULT` (Default: `11534336` / `11MB`): Default payload size limit for all other JSON-RPC methods.
-
-**Security:**
-*   `OLG_TRACE_UPLOAD_ALLOWED_URL` (Default: `unset`): Sets the explicitly allowed destination base URL for `trace` uploads. Must be an HTTPS URI (e.g. `https://openwifi.wlan.local:16003`). Incoming trace requests with a `uri` that does not match this scheme, hostname, and port are rejected. If omitted, all trace uploads are strictly disabled for security.
-
-
----
-
-## 4. Running Test Suites
-
-Verify all components are functioning using the standard Go test command:
+## Common commands
 ```bash
-go test -v ./...
+go test ./...
+UNFORMATTED=$(gofmt -l $(find . -type f -name '*.go' -not -path './.git/*'))
+test -z "$UNFORMATTED"
+go build ./...
+go run ./cmd/ucentral-client -config ./config.json
 ```
-To run tests with code coverage:
+
+## Testing
+This client has been tested and validated against the opensource OpenLan Cloud Controller [Mango Cloud](https://www.mangowifi.cloud/) deployment version 1.0. This real-world integration confirms compatibility with core OpenWiFi Cloud Controller specifications, including strict mTLS WebSocket handshakes, JSON-RPC 2.0 schema validation, and real-time NATS state synchronization under production-like conditions.
+
+## CI coverage
+`.github/workflows/ci.yml` validates:
+* Module verification
+* `gofmt` formatting check
+* `go vet` and `staticcheck` for static analysis
+* `govulncheck` and advisory `gosec` for security vulnerabilities
+* `go test -v -race -p=1 ./...` (with data race detection and sequential execution)
+* `go build ./...`
+
+## Binary usage
+The current binary supports:
+* long-running runtime mode using `websocket.WSClient` and `nats.NATSClient` (Start, handler registration, graceful Close)
+* strict JSON-RPC payload limit parsing and memory clamping via `OLG_PAYLOAD_LIMIT_*` environment variables
+* configuration workflow dispatching to `cmd.configure.vyos`
+* action workflow dispatching to `cmd.action.vyos.<action>`
+* automatic lock release and transaction timeouts when downstream agents fail to respond
+* deep JSON-RPC error translations leveraging standard `-32603` schemas for application failures
+
 ```bash
-go test -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out
+go run ./cmd/ucentral-client -config ./config.json
 ```
+
+**Options**
+| Option | Description |
+| --- | --- |
+| `-config <path>` | Path to the JSON configuration file. |
+
+## Current behavior
+Running the client loads the configuration, initializes the `CapabilityCache`, `PriorityScheduler`, `OperationStore`, and `NATSClient`. It then dials the OpenWiFi Cloud WebSocket.
+
+Once the `WSClient` achieves a `connected and verified` state, it begins receiving JSON-RPC frames. 
+It uses the `ReqManager` to create transactions and locks. If the request is state-changing (like `upgrade` or `reboot`), it sets a lock. It publishes the command to NATS, sets a dispatch timeout, and waits for a response on `result.vyos`.
+
+When the downstream agent publishes a result, the NATS handler validates the result envelope against expected schema constraints. It parses it via `BuildDeviceResultObject()`, translates it into JSON-RPC, and pushes it to the Outbound Scheduler back to the Cloud.
+
+## Design principle
+`TIP-olg-ucentral-client` handles Cloud-facing behavior (WebSocket stability, JSON-RPC schema compliance, queueing, request management). `vyos-nats-agent` (or similar agents) handles device-specific orchestration. Real VyOS behavior stays behind the NATS boundary so the client remains purely a lightweight, high-performance protocol bridge.
