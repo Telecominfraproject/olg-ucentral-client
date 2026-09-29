@@ -237,7 +237,6 @@ func processNATSResult(ctx context.Context, res agentcore.ResultEnvelope, compon
 		log.Printf("[NATS RESULT] WARNING: Transaction not found for NATS RPCID: %s\n", res.RPCID)
 		return
 	}
-	sessionID := tx.CloudSessionID
 	rawCloudID := tx.CloudRPCID
 	isNotification := !tx.RespondToCloud
 
@@ -303,15 +302,6 @@ func processNATSResult(ctx context.Context, res agentcore.ResultEnvelope, compon
 			return
 		}
 	}
-
-	if !isNotification {
-		log.Printf("[NATS RESULT] Pushing response to cloud (Session=%s, ID=%s, Size=%d)\n", sessionID, contracts.FormatLogID(rawCloudID), len(respBytes))
-		_ = components.Scheduler.Push(queues.OutboundMessage{
-			SessionID: sessionID,
-			Priority:  queues.PriorityHighest,
-			Payload:   respBytes,
-		})
-	}
 }
 
 func handleNATSResult(ctx context.Context, res agentcore.ResultEnvelope, resultQueue chan<- agentcore.ResultEnvelope, components *AppComponents, serial string) {
@@ -344,11 +334,10 @@ func handleNATSResult(ctx context.Context, res agentcore.ResultEnvelope, resultQ
 			}
 
 			// Complete and cache the transaction in RequestManager so it is resolved and cleaned up from memory.
-			// We do not push it to the scheduler to avoid further congestion.
 			if tx.Method == string(contracts.ActionUpgrade) {
 				if res.Result != string(contracts.ResultSuccess) || (res.ErrorCode != "" && res.ErrorCode != "0") {
 					log.Printf("[NATS RESULT OVERFLOW] WARNING: Upgrade request rejected by device. Aborting persistent operation for RPCID %s\n", res.RPCID)
-					_ = components.ReqManager.Fail(res.RPCID, respBytes) // Ignore error since we don't push overflow failures anyway
+					_ = components.ReqManager.Fail(res.RPCID, respBytes)
 					return
 				}
 				_, err := components.ReqManager.RespondAndRetain(ctx, res.RPCID, respBytes)
@@ -360,7 +349,21 @@ func handleNATSResult(ctx context.Context, res agentcore.ResultEnvelope, resultQ
 					return
 				default:
 					log.Printf("[NATS RESULT OVERFLOW] ERROR: RespondAndRetain failed for upgrade RPCID %s: %v\n", res.RPCID, err)
-					_ = components.ReqManager.Fail(res.RPCID, nil) // Ignore error since we don't push overflow failures anyway
+					if !isNotification {
+						errResp := contracts.JSONRPCResponse{
+							JSONRPC: contracts.JSONRPCVersion,
+							Error: &contracts.JSONRPCError{
+								Code:    -32603,
+								Message: "Internal Error",
+								Data:    json.RawMessage(`"Failed to establish persistent upgrade operation"`),
+							},
+							ID: tx.CloudRPCID,
+						}
+						respBytes, _ = json.Marshal(errResp)
+					}
+					if failErr := components.ReqManager.Fail(res.RPCID, respBytes); failErr != nil {
+						log.Printf("[NATS RESULT OVERFLOW] WARNING: Fail() rejected after RespondAndRetain failure for RPCID %s: %v\n", res.RPCID, failErr)
+					}
 					return
 				}
 			} else {
@@ -369,7 +372,7 @@ func handleNATSResult(ctx context.Context, res agentcore.ResultEnvelope, resultQ
 					return
 				}
 			}
-			log.Printf("[NATS RESULT OVERFLOW] Warning: Completed/cached transaction rpc_id=%s, but omitted outbound WebSocket scheduler enqueue to avoid congestion.\n", res.RPCID)
+			log.Printf("[NATS RESULT OVERFLOW] Resolved and cached transaction rpc_id=%s directly upon resultQueue capacity overflow.\n", res.RPCID)
 		}
 	}
 }
@@ -512,7 +515,7 @@ func initializeComponents(ctx context.Context, cfg *config.Config, cacheTTLConfi
 		scheduler,
 		store,
 		cfg.Queues.MaxConcurrentRequests,
-		5*time.Minute,
+		15*time.Minute,
 		1000,
 	)
 	if err != nil {

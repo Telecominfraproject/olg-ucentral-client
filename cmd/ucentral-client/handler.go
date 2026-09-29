@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -342,7 +341,9 @@ func (h *frameHandler) HandleFrame(ctx context.Context, frame websocket.InboundF
 
 		log.Printf("[FrameHandler] Transaction admission failed: %v\n", err)
 		if !isNotification {
-			if errors.Is(err, reqmgr.ErrCapacityExceeded) || strings.Contains(err.Error(), "busy") || strings.Contains(err.Error(), "concurrency lock") {
+			if errors.Is(err, reqmgr.ErrCapacityExceeded) ||
+				errors.Is(err, reqmgr.ErrStateLockBusy) ||
+				errors.Is(err, reqmgr.ErrDuplicateRequest) {
 				errObj := &contracts.JSONRPCError{
 					Code:    contracts.ErrInternal,
 					Message: "Device is busy",
@@ -453,14 +454,7 @@ func (h *frameHandler) failTransactionWithCode(tx *reqmgr.Transaction, err error
 
 	switch {
 	case failErr == nil:
-		// failure won; send failure response
-		if tx.RespondToCloud {
-			_ = h.scheduler.Push(queues.OutboundMessage{
-				SessionID: tx.CloudSessionID,
-				Priority:  queues.PriorityHighest,
-				Payload:   respBytes,
-			})
-		}
+		// failure won; Fail() in reqmgr automatically pushes respBytes to scheduler
 	case errors.Is(failErr, reqmgr.ErrAlreadyTerminal):
 		// another terminal event (like a fast success reply) won
 		// DO NOT send this failure response, as the success response was already sent!
