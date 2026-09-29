@@ -135,6 +135,7 @@ func (mc *MockCloud) WaitForConnection(t *testing.T, timeout time.Duration) {
 
 func (mc *MockCloud) SendMessage(t *testing.T, msg string) {
 	t.Helper()
+
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 	if mc.conn == nil {
@@ -228,9 +229,10 @@ func getTestConfig(t *testing.T, mc *MockCloud, ns *server.Server) map[string]in
 		t.Fatalf("Failed to generate RSA key: %v", err)
 	}
 
+	testSerial := "001122334455"
 	template := x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "localhost"},
+		Subject:               pkix.Name{CommonName: testSerial},
 		NotBefore:             time.Now(),
 		NotAfter:              time.Now().Add(365 * 24 * time.Hour),
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
@@ -253,14 +255,19 @@ func getTestConfig(t *testing.T, mc *MockCloud, ns *server.Server) map[string]in
 		t.Fatalf("Failed to write dummy client key: %v", err)
 	}
 
+	mapFile := filepath.Join(t.TempDir(), "interface_map.json")
+	if err := os.WriteFile(mapFile, []byte(fmt.Sprintf(`{"serial": "%s"}`, testSerial)), 0644); err != nil {
+		t.Fatalf("Failed to write mapFile: %v", err)
+	}
 	capFile := filepath.Join(t.TempDir(), "capabilities.json")
-	if err := os.WriteFile(capFile, []byte(`{"compatible":"vyos", "version": {"olg": {"major": 1, "minor": 0, "patch": 0}}}`), 0644); err != nil {
-		t.Fatalf("Failed to write capabilities.json: %v", err)
+	if err := os.WriteFile(capFile, []byte(`{"compatible": "OpenLAN Gateway", "version": {"olg": {"major": 1, "minor": 0, "patch": 0}}}`), 0644); err != nil {
+		t.Fatalf("Failed to write capFile: %v", err)
 	}
 
+	t.Setenv("OW_INTERFACE_MAP_FILE", mapFile)
+	t.Setenv("OW_CAPABILITIES_FILE", capFile)
+
 	return map[string]interface{}{
-		"serial":            "001122334455",
-		"capabilities_file": capFile,
 		"cloud": map[string]interface{}{
 			"url":                              mc.URL,
 			"connect_timeout_seconds":          30,
@@ -356,9 +363,7 @@ func startClientProcess(t *testing.T, mc *MockCloud, cfg map[string]interface{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, clientBinPath, "-config", writeTempConfig(t, cfg))
-	if capFile, ok := cfg["capabilities_file"].(string); ok {
-		cmd.Dir = filepath.Dir(capFile)
-	}
+	cmd.Dir = t.TempDir()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -380,7 +385,9 @@ func startClientProcess(t *testing.T, mc *MockCloud, cfg map[string]interface{})
 
 func TestConfigValidation_InvalidConfig(t *testing.T) {
 	cfg := getTestConfig(t, startMockCloud(t), startEmbeddedNATS(t))
-	cfg["serial"] = ""
+	// Invalidate a field that config.json still owns to ensure config validation fails
+	cloudCfg := cfg["cloud"].(map[string]interface{})
+	cloudCfg["url"] = "://invalid-url" // Malformed URL will fail Cloud.Validate()
 	configPath := writeTempConfig(t, cfg)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -388,6 +395,31 @@ func TestConfigValidation_InvalidConfig(t *testing.T) {
 	err := cmd.Run()
 	if err == nil {
 		t.Fatalf("Expected client to fail on invalid config, but it succeeded")
+	}
+}
+
+func TestConfigValidation_SerialCertificateMismatch(t *testing.T) {
+	ns := startEmbeddedNATS(t)
+	mc := startMockCloud(t)
+	cfg := getTestConfig(t, mc, ns)
+
+	// Set interface_map to a mismatched serial
+	mismatchMapFile := filepath.Join(t.TempDir(), "interface_map_mismatch.json")
+	if err := os.WriteFile(mismatchMapFile, []byte(`{"serial": "mismatched-serial-999"}`), 0644); err != nil {
+		t.Fatalf("Failed to write mismatch mapFile: %v", err)
+	}
+	t.Setenv("OW_INTERFACE_MAP_FILE", mismatchMapFile)
+
+	configPath := writeTempConfig(t, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, clientBinPath, "-config", configPath)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("Expected client to fail on serial / cert mismatch, but it succeeded")
+	}
+	if !strings.Contains(string(output), "serial mismatch") {
+		t.Errorf("Expected output to contain 'serial mismatch', got: %s", string(output))
 	}
 }
 

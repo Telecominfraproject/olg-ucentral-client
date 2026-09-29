@@ -1,5 +1,4 @@
 {
-  "serial": "001122334455",
   "cloud": {
     "url": "wss://openwifi.wlan.local:15002",
     "connect_timeout_seconds": 30,

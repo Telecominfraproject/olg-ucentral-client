@@ -440,14 +440,6 @@ TIP-olg-ucentral-client/
 
     func (r *ResultEnvelope) Validate() error
 
-    type CloudCapabilitiesQuery struct {
-    	Version       string `json:"version"`
-    	RPCID string `json:"rpc_id"`
-    	Target        string `json:"target"`
-    	CommandType   string `json:"command_type"`
-    	Action        string `json:"action"`
-    	Timestamp     string `json:"timestamp"`
-    }
 
     type CloudDeviceStatusQuery struct {
     	Version       string `json:"version"`
@@ -1153,7 +1145,6 @@ If the result payload cannot be decoded or its `rpc_id` does not match an active
     func (n *NATSClient) SubscribeResults(ctx context.Context, target string, handler func(env agentcore.ResultEnvelope)) error
 
     // Query Envelopes (Stubbed due to agentcore limitations)
-    func (n *NATSClient) QueryCapabilities(ctx context.Context, query *contracts.CloudCapabilitiesQuery) ([]byte, error)
     func (n *NATSClient) QueryDeviceStatus(ctx context.Context, query *contracts.CloudDeviceStatusQuery) (*agentcore.StatusEnvelope, error)
 
     // Subscriptions
@@ -1171,7 +1162,6 @@ The uCentral client must not register a NATS responder for `status.get.<target>`
 
 #### PR 4.3: Dynamic Capabilities & Local Signal Sockets
 *   **Target File:** `pkg/nats/capabilities.go`
-*   **Unix Socket Refresh Handler:**
     ```go
     package nats
 
@@ -1179,8 +1169,6 @@ The uCentral client must not register a NATS responder for `status.get.<target>`
     	capabilities []byte
     	firmware     string
     }
-
-    func StartUnixSignalListener(socketPath string, refreshCallback func()) error
     ```
 
 ---

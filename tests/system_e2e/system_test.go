@@ -337,20 +337,23 @@ func createHTTPClient(t *testing.T, timeout time.Duration) *http.Client {
 
 	tlsConfig := &tls.Config{}
 
-	if os.Getenv("OW_INSECURE_TLS") == "true" {
-		tlsConfig.InsecureSkipVerify = true
-	} else {
-		caFile := getEnvOrDefault("OW_CA_FILE", "../../ca.pem")
+	caCertPool, err := x509.SystemCertPool()
+	if err != nil || caCertPool == nil {
+		caCertPool = x509.NewCertPool()
+	}
+
+	caFile := getEnvOrDefault("OW_CA_FILE", "")
+	if caFile != "" {
 		caCert, err := os.ReadFile(caFile)
 		if err != nil {
-			t.Fatalf("Failed to read CA file %s (set OW_INSECURE_TLS=true to bypass): %v", caFile, err)
+			t.Fatalf("Failed to read CA file %s: %v", caFile, err)
 		}
-		caCertPool := x509.NewCertPool()
+
 		if !caCertPool.AppendCertsFromPEM(caCert) {
 			t.Fatalf("Failed to parse CA certificate from %s", caFile)
 		}
-		tlsConfig.RootCAs = caCertPool
 	}
+	tlsConfig.RootCAs = caCertPool
 
 	return &http.Client{
 		Transport: &http.Transport{TLSClientConfig: tlsConfig},

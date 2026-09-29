@@ -133,7 +133,6 @@ To guarantee flawless integration with the existing VyOS NATS client, all NATS s
 *   **Log Publish:** `logs.<target>` (Pub-Sub)
 *   **Health Publish:** `health.<target>` (Pub-Sub)
 *   **Command Result:** `result.<target>` (Pub-Sub)
-*   **Capability Discovery:** `capabilities.get.<target>` (Request-Reply)
 *   **Device Status Query:** `status.get.<target>` (Request-Reply)
 
 The `status.get` subject is owned by the downstream device/local agent. The uCentral client publishes request-reply queries to this subject for current device/platform status and upgrade recovery. The uCentral client must not subscribe to or respond on this subject.
@@ -141,27 +140,21 @@ The `status.get` subject is owned by the downstream device/local agent. The uCen
 *Security Boundary:* Read-only metadata calls (such as capability and status retrieval) are mapped to their own explicit subject namespaces, keeping them separate from destructive/operational `action.*` subjects. The daemon acts as a 1-to-N gateway routing these actions securely to the appropriate downstream agent.
 
 ### 2.4 Capability Discovery & Caching Flow
-At startup, the client retrieves downstream device capabilities using the dedicated NATS query subject:
+At startup, the client retrieves the hardware capabilities directly from the provisioned file:
 
 ```mermaid
 sequenceDiagram
     participant GoClient as uCentral Client
-    participant NATS as NATS Bus
-    participant VyOS as VyOS NATS Client
+    participant OS as Host Machine File System
+    participant Cloud as OpenWiFi Cloud
 
-    GoClient->>Cloud: WebSocket 'connect'
-    GoClient->>NATS: Request 'capabilities.get' (with CloudCapabilitiesQuery envelope)
-    NATS->>VyOS: Deliver Request
-    VyOS->>VyOS: Read local capabilities
-    VyOS-->>NATS: Reply: JSON capability payload
-    NATS-->>GoClient: Deliver Reply
+    GoClient->>OS: os.ReadFile(/etc/ucentral/capabilities.json)
+    OS-->>GoClient: JSON capability payload
+    GoClient->>GoClient: Parse and Cache Capabilities
+    GoClient->>Cloud: WebSocket 'connect' with capabilities
 ```
 
-*   **Caching Strategy:** The capability cache is populated once after the first usable NATS connection and downstream capability responder availability. If initial retrieval fails, the client retries with bounded exponential backoff until the initial cache is populated. After successful initialization, capabilities are not automatically re-fetched on subsequent NATS reconnect events to avoid traffic congestion.
-*   **Refresh Events:** The cache is refreshed only:
-    1. Upon detecting a firmware version change.
-    2. Upon receipt of a specific system reboot log indicating an upgrade.
-    3. If an explicit capability refresh event is received over a local Unix domain socket (restricted to root access).
+*   **Caching Strategy:** The capability cache is populated immediately at startup by reading the securely provisioned hardware file. Once loaded, the capabilities are retained in memory and served directly to the Cloud during the WebSocket handshake. If the physical file is missing or unreadable, the client initialization will fail until the hardware is correctly provisioned by the host machine.
 
 ### 2.5 JetStream Consistency Model
 *   **Desired Configuration:** Leverages JetStream Key-Value (KV) store using `cfg_desired` bucket and key `desired.<serial>`. The client writes the desired state to KV, then publishes a lightweight trigger to the `config.apply` subject.
@@ -216,7 +209,7 @@ To protect device integrity, the client divides requests into two execution clas
 1.  **State-Changing Commands (Serialized):** Commands that modify device state or execute sensitive operations (`configure`, `reboot`, `factory`, `upgrade`, `certupdate`, `reenroll`, `script`, `leds`) are **serialized** (one at a time per device).
     *   *Rule:* The Request Manager must atomically reserve the state lock during transaction creation. If a serialized transaction is currently `Created`, `PreparingDispatch`, `PendingPublish`, or `InFlight`, any new serialized request (with a different Cloud `id`) is immediately rejected with a `busy` status (Error Code -32603 / Result: `busy`).
     *   *Benefit:* Eliminates the overhead of complex command queue backlogs, ensures strict sequential application of system changes, and guarantees state mutation exclusivity.
-2.  **Read-Only Commands (Parallel):** Metadata, query operations, and diagnostics (`capabilities.get`, `status.get`, `ping`, `trace`, `telemetry`, `remote_access`) are processed in parallel.
+2.  **Read-Only Commands (Parallel):** Metadata, query operations, and diagnostics (`status.get`, `ping`, `trace`, `telemetry`, `remote_access`) are processed in parallel.
     *   *Rule:* Query operations do not acquire the device state lock and are published to NATS immediately, even if a configuration transaction is in progress.
     *   *Ownership:* `status.get` is a downstream device/local-agent query. The uCentral client sends the request and waits for the downstream response; it does not serve responses on this subject.
 
@@ -228,7 +221,7 @@ To protect device integrity, the client divides requests into two execution clas
     *   `reboot`, `remote_access`: **10 minutes**
     *   `factory`, `certupdate`, `reenroll`, `script`: **30 minutes**
     *   `upgrade` (Firmware): **60 minutes from completion**. Firmware upgrades are processed as **asynchronous actions**—the client returns an immediate "started" status and forwards progress updates to the cloud.
-    *   `ping`, `trace`, `telemetry`, `capabilities.get`, `status.get`: **2 minutes** (Diagnostics default)
+    *   `ping`, `trace`, `telemetry`, `status.get`: **2 minutes** (Diagnostics default)
 
 ### 3.4 Behavior Across Reconnects
 *   **Cloud Disconnections:** If the WAN connection to the Cloud drops while a transaction is `InFlight`, the client **continues running the operation downstream**. It does not abort the configuration or reboot.
@@ -250,7 +243,7 @@ To prevent hanging operations, the Request Manager enforces strict timeout thres
 
 *   **Configuration Apply Timeout (`OLG_TIMEOUT_CONFIGURE`):** **30 seconds** default. Applies only to `configure`.
 *   **Extended Action Timeout (`OLG_TIMEOUT_ACTION_EXTENDED`):** **120 seconds** default. Applies to long-running actions: `upgrade`, `certupdate`, `script`, and `trace`.
-*   **Action Timeout (`OLG_TIMEOUT_ACTION_DEFAULT`):** **60 seconds** default. Applies to all other standard diagnostic and state-changing actions: `reboot`, `factory`, `ping`, `leds`, `telemetry`, `remote_access`, `capabilities.get`, and `status.get`.
+*   **Action Timeout (`OLG_TIMEOUT_ACTION_DEFAULT`):** **60 seconds** default. Applies to all other standard diagnostic and state-changing actions: `reboot`, `factory`, `ping`, `leds`, `telemetry`, `remote_access`, and `status.get`.
 *   **Dispatch / NATS Publish Timeout (`OLG_TIMEOUT_DISPATCH`):** **5 seconds** default. Bounds the local preparation and buffer dispatch phases.
 
 

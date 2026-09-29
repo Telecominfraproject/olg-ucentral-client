@@ -58,6 +58,20 @@ func main() {
 		log.Fatalf("FATAL: Invalid configuration: %v", err)
 	}
 
+	// 2.5 Load physical serial number from mapping file
+	interfaceMapPath := "/etc/ucentral/interface_map.json"
+	if envPath := os.Getenv("OW_INTERFACE_MAP_FILE"); envPath != "" {
+		interfaceMapPath = envPath
+	}
+	serial, err := config.LoadSerialFromMapping(interfaceMapPath)
+	if err != nil {
+		log.Fatalf("FATAL: Failed to read serial from mapping file: %v", err)
+	}
+	cfg.Serial = serial
+	if err := cfg.ValidateSerialBinding(); err != nil {
+		log.Fatalf("FATAL: %v", err)
+	}
+
 	// 3. Load CacheTTLConfig from environment variables
 	cacheTTLConfig, err := config.LoadCacheTTLConfigFromEnv()
 	if err != nil {
@@ -474,7 +488,14 @@ func initializeComponents(ctx context.Context, cfg *config.Config, cacheTTLConfi
 
 	// Initialize capability cache
 	log.Println("Initializing CapabilityCache...")
-	capCache := nats.NewCapabilityCache("./capabilities.json")
+	capabilitiesPath := "/etc/ucentral/capabilities.json"
+	if envPath := os.Getenv("OW_CAPABILITIES_FILE"); envPath != "" {
+		capabilitiesPath = envPath
+	}
+	capCache, err := nats.NewCapabilityCache(capabilitiesPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize capability cache: %w", err)
+	}
 
 	// Initialize Outbound Schedulers and Buffers
 	log.Println("Initializing Outbound Schedulers...")

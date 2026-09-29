@@ -34,7 +34,7 @@ Example config file:
 
 Important rule:
 - Environment variables override operational timeouts, payload limits, and cache TTLs. A complete list of all supported operational variables and their defaults is documented in the provided `.env.example` file.
-- `config.json` dictates network routes, queue capacities, TLS paths, and the device serial number.
+- `config.json` dictates network routes, queue capacities, and TLS paths. The `serial` field is strictly ignored in `config.json` to prevent identity spoofing.
 
 The agent must not hardcode Cloud URLs, NATS servers, or TLS paths.
 
@@ -46,7 +46,7 @@ To successfully configure and connect the client to an OpenWiFi Cloud Controller
 
 1. **Obtain mTLS Certificates:** You must provision the device with a valid `cert.pem` and `key.pem` signed by the Cloud's operational Certificate Authority. You will also need the public Root CA bundle (`ca.pem` or system certificates).
 2. **Set the Target URL:** In `config.json`, configure the `cloud.url` to point to the Cloud Controller's WebSocket port (typically `15002`, not `443`), for example: `wss://openwifi.example.com:15002`.
-3. **Configure the Identity:** The configured `serial` in `config.json` must match the device identity expected by the OpenWiFi Cloud Controller. Where the Controller binds the device identity to the client certificate CN, these values must match.
+3. **Configure the Identity:** The device identity is securely loaded from the path specified by the `OW_INTERFACE_MAP_FILE` environment variable, which defaults to `/etc/ucentral/interface_map.json` at boot. This file must be provisioned by the host hardware and must contain a serial number matching what is expected by the Cloud Controller (and bound to the client certificate CN).
 4. **Start the Local Bus:** Ensure a local NATS server is running and accessible.
    * **Production:** Must use secure `tls://...` connections with a valid `credentials_file` and `ca_file`.
    * **Local/CI Development:** Can use plaintext `nats://127.0.0.1:4222` provided `"allow_insecure_local_dev": true` is explicitly set in the configuration.

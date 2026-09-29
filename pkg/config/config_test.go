@@ -11,6 +11,7 @@ import (
 	"github.com/nats-io/nkeys"
 	"math/big"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -203,7 +204,7 @@ func TestConfig_Validation(t *testing.T) {
 		name string
 		mut  func(c *Config)
 	}{
-		{"Empty serial", func(c *Config) { c.Serial = "" }},
+
 		{"Malformed URL", func(c *Config) { c.Cloud.URL = "wss://" }},
 		{"Missing host URL", func(c *Config) { c.Cloud.URL = "wss:// invalid" }},
 		{"Invalid URL scheme", func(c *Config) { c.Cloud.URL = "ws://insecure" }},
@@ -364,4 +365,196 @@ func generateTestCreds(t *testing.T) string {
 		t.Fatalf("failed to format user config: %v", err)
 	}
 	return string(creds)
+}
+
+func TestLoadSerialFromMapping(t *testing.T) {
+	tempDir := t.TempDir()
+
+	tests := []struct {
+		name        string
+		fileContent string
+		fileExists  bool
+		wantSerial  string
+		wantErr     bool
+	}{
+		{
+			name:        "valid serial",
+			fileContent: `{"serial": "abc123def456"}`,
+			fileExists:  true,
+			wantSerial:  "abc123def456",
+			wantErr:     false,
+		},
+		{
+			name:        "missing file",
+			fileContent: "",
+			fileExists:  false,
+			wantSerial:  "",
+			wantErr:     true,
+		},
+		{
+			name:        "malformed JSON",
+			fileContent: `{serial: "abc"}`,
+			fileExists:  true,
+			wantSerial:  "",
+			wantErr:     true,
+		},
+		{
+			name:        "missing serial field",
+			fileContent: `{"other": "value"}`,
+			fileExists:  true,
+			wantSerial:  "",
+			wantErr:     true,
+		},
+		{
+			name:        "empty serial",
+			fileContent: `{"serial": ""}`,
+			fileExists:  true,
+			wantSerial:  "",
+			wantErr:     true,
+		},
+		{
+			name:        "whitespace serial",
+			fileContent: `{"serial": "   "}`,
+			fileExists:  true,
+			wantSerial:  "",
+			wantErr:     true,
+		},
+		{
+			name:        "whitespace padded serial",
+			fileContent: `{"serial": "   abc123def456   "}`,
+			fileExists:  true,
+			wantSerial:  "abc123def456",
+			wantErr:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filePath := filepath.Join(tempDir, "interface_map_"+strings.ReplaceAll(tt.name, " ", "_")+".json")
+
+			if tt.fileExists {
+				err := os.WriteFile(filePath, []byte(tt.fileContent), 0644)
+				if err != nil {
+					t.Fatalf("Failed to write mock file: %v", err)
+				}
+			}
+
+			got, err := LoadSerialFromMapping(filePath)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("LoadSerialFromMapping() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if got != tt.wantSerial {
+				t.Errorf("LoadSerialFromMapping() got = %v, want %v", got, tt.wantSerial)
+			}
+		})
+	}
+}
+
+func TestConfig_ValidateSerialBinding(t *testing.T) {
+	tmpDir := t.TempDir()
+	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+
+	createCert := func(cn string, sans []string) string {
+		template := x509.Certificate{
+			SerialNumber:          big.NewInt(1),
+			Subject:               pkix.Name{CommonName: cn},
+			DNSNames:              sans,
+			NotBefore:             time.Now(),
+			NotAfter:              time.Now().Add(time.Hour),
+			KeyUsage:              x509.KeyUsageDigitalSignature,
+			ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+			BasicConstraintsValid: true,
+		}
+		derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+		if err != nil {
+			t.Fatalf("failed to create cert: %v", err)
+		}
+		certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+		path := filepath.Join(tmpDir, cn+"_cert.pem")
+		if err := os.WriteFile(path, certPEM, 0644); err != nil {
+			t.Fatalf("failed to write cert: %v", err)
+		}
+		return path
+	}
+
+	keyBytes, _ := x509.MarshalECPrivateKey(priv)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyBytes})
+	keyPath := filepath.Join(tmpDir, "key.pem")
+	_ = os.WriteFile(keyPath, keyPEM, 0600)
+
+	certMatchingCN := createCert("serial-12345", nil)
+	certMatchingSAN := createCert("", []string{"serial-san-67890"})
+	certMismatch := createCert("serial-99999", nil)
+
+	tests := []struct {
+		name       string
+		serial     string
+		certFile   string
+		keyFile    string
+		expectErr  bool
+		errContain string
+	}{
+		{
+			name:      "exact match with CN",
+			serial:    "serial-12345",
+			certFile:  certMatchingCN,
+			keyFile:   keyPath,
+			expectErr: false,
+		},
+		{
+			name:      "case-insensitive match with CN",
+			serial:    "SERIAL-12345",
+			certFile:  certMatchingCN,
+			keyFile:   keyPath,
+			expectErr: false,
+		},
+		{
+			name:      "match with SAN DNS",
+			serial:    "serial-san-67890",
+			certFile:  certMatchingSAN,
+			keyFile:   keyPath,
+			expectErr: false,
+		},
+		{
+			name:       "mismatch between serial and CN",
+			serial:     "serial-12345",
+			certFile:   certMismatch,
+			keyFile:    keyPath,
+			expectErr:  true,
+			errContain: "serial mismatch",
+		},
+		{
+			name:       "empty serial",
+			serial:     "",
+			certFile:   certMatchingCN,
+			keyFile:    keyPath,
+			expectErr:  true,
+			errContain: "serial cannot be empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{
+				Serial: tt.serial,
+				Cloud: CloudConfig{
+					TLS: CloudTLSConfig{
+						ClientCertFile: tt.certFile,
+						ClientKeyFile:  tt.keyFile,
+					},
+				},
+			}
+			err := cfg.ValidateSerialBinding()
+			if (err != nil) != tt.expectErr {
+				t.Fatalf("ValidateSerialBinding() error = %v, expectErr %v", err, tt.expectErr)
+			}
+			if tt.expectErr && tt.errContain != "" {
+				if !strings.Contains(err.Error(), tt.errContain) {
+					t.Errorf("expected error to contain %q, got %v", tt.errContain, err)
+				}
+			}
+		})
+	}
 }
