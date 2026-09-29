@@ -208,7 +208,7 @@ This document details the test plans, test cases, and verification strategies fo
     *   *Setup & Assert (Expiration):* Write results for `ping` (using `Default` TTL 2 mins), `configure` (using overridden 6 mins), `reboot` (default 10 mins), `factory` (default 30 mins), and `upgrade` (default 60 mins) to `TransactionCache`. Mock clock time to advance 15 minutes. Cache lookups for `ping`, `configure`, and `reboot` must return `false` (expired). Lookups for `factory` and `upgrade` must return `true` (cached).
 *   **TC-RM-006 (Transaction Retry Policy & Backoff):**
     *   *Requirement Mapping:* `REQ-025` (Transaction Retry Policy)
-    *   *Setup:* Submit a read-only request (`capabilities.get`) and a state-changing request (`configure`). For the read-only request, simulate timeouts for attempt 1 and 2. After attempt 2 times out, simulate a late downstream response for attempt 1 arriving exactly while attempt 3 is active on the wire.
+    *   *Setup:* Submit a read-only request (`status.get`) and a state-changing request (`configure`). For the read-only request, simulate timeouts for attempt 1 and 2. After attempt 2 times out, simulate a late downstream response for attempt 1 arriving exactly while attempt 3 is active on the wire.
     *   *Assert:* The state-changing request must fail fast on the first error with no retries. The read-only request must retain the exact same `rpc_id` across 3 total attempts (1 initial + 2 retries). Each attempt must use an independent request timeout. The overall transaction must remain active during the exponential backoff periods. When the late response for attempt 1 arrives during attempt 3, the transaction must immediately transition to `Completed`, winning the race, and any subsequent reply from attempt 3 must be gracefully ignored.
 *   **TC-RM-007 (JSON-RPC ID Preservation & Boundaries):**
     *   *Requirement Mapping:* `REQ-027` (JSON-RPC ID Preservation & Edge Cases)
@@ -333,18 +333,16 @@ This document details the test plans, test cases, and verification strategies fo
 
 
 ### PR 4.3: Dynamic Capabilities & Sockets Tests
-*   **TC-NET-005 (Unix Socket Refresh Trigger):**
-    *   *Requirement Mapping:* `REQ-017` (Local Management Signal Security)
-    *   *Setup:* Run Unix socket listener. Write a refresh command into the socket.
-    *   *Assert:* Capabilities cache callback must be invoked. Socket file permission must be validated as root-only.
+
+*   **TC-NET-005 (Removed):** Test removed as Unix socket listener is no longer supported.
 *   **TC-NET-006 (Audit Log Loop Prevention):**
     *   *Requirement Mapping:* `REQ-018` (Audit Logging & Loop Prevention)
     *   *Setup:* Force NATS publish failures during audit log writes.
     *   *Assert:* Client increments `audit_delivery_failure` but does not trigger recursive log writes.
-*   **TC-NET-008 (Capability Retrieval & Caching Lifecycle):**
-    *   *Requirement Mapping:* `REQ-022` (Capability Caching & Lifecycle)
-    *   *Setup:* Start the client with NATS and the downstream responder initially unavailable. Verify retry backoff. Bring NATS and the responder online. Trigger a subsequent NATS reconnect event.
-    *   *Assert:* The client must retry capability retrieval with bounded backoff until successful. Once the cache is successfully populated, no new fetch must be triggered on subsequent NATS reconnect events. Simulate a local Unix socket capabilities refresh command; the capabilities must be updated.
+*   **TC-NET-008 (Capability Retrieval & Initialization):**
+    *   *Requirement Mapping:* `REQ-022` (Capability Initialization)
+    *   *Setup:* Start the client in various environments: 1) with a valid `capabilities.json` file, 2) with the file missing, 3) with malformed JSON, and 4) with the `version.olg` payload missing.
+    *   *Assert:* The client must successfully initialize and cache capabilities in scenario 1. In scenarios 2, 3, and 4, the client must immediately fail initialization and hard-crash on boot before attempting any NATS or WebSocket connections.
 *   **TC-NET-010 (Independent Connection-State Transitions & Lifecycle Edges):**
     *   *Requirement Mapping:* `REQ-002`
     *   *Setup:* Independently change Cloud, NATS, and protocol verification states.
@@ -363,14 +361,11 @@ This document details the test plans, test cases, and verification strategies fo
         * Losing Cloud does not change or reconnect the NATS link.
         * Losing NATS does not change or reconnect the Cloud link.
         * `DeriveConnectionState` gracefully rejects invalid string enum values (e.g. `LinkState("offline")` or `LinkState("")`) with an explicit error rather than silently mapping them to `Offline`.
-*   **TC-NET-011 (Unix Socket Rate Limiting & Auditing):**
-    *   *Requirement Mapping:* `REQ-017` (Local Management Signal Security), `REQ-018` (Audit Logging & Loop Prevention)
-    *   *Setup:* Send 10 capability refresh requests to the Unix socket in 1 second. Trigger sensitive actions (`reboot`, `factory`, `upgrade`, `certupdate`, `reenroll`, `script`).
-    *   *Assert:* The Unix socket listener must rate-limit and reject excess refresh requests. Sensitive actions must successfully emit high-severity audit logs to the Cloud while guaranteeing the complete redaction of certificate contents, script source, script signatures, and script output.
-*   **TC-NET-012 (Syslog-Triggered Capability Refreshes):**
-    *   *Requirement Mapping:* `REQ-022` (Capability Caching & Lifecycle)
-    *   *Setup:* Input a syslog message indicating a firmware version change, and a NATS message indicating an upgrade reboot log.
-    *   *Assert:* Both trigger events must invalidate the capability cache and launch a new downstream NATS capability discovery query.
+*   **TC-NET-011 (Audit Log Redaction):**
+    *   *Requirement Mapping:* `REQ-018` (Audit Logging & Loop Prevention)
+    *   *Setup:* Trigger sensitive actions (`reboot`, `factory`, `upgrade`, `certupdate`, `reenroll`, `script`).
+    *   *Assert:* Sensitive actions must successfully emit high-severity audit logs to the Cloud while guaranteeing the complete redaction of certificate contents, script source, script signatures, and script output.
+*   **TC-NET-012 (Removed):** Test removed as syslog-triggered capability refreshes are no longer supported.
 
 ---
 
@@ -422,12 +417,12 @@ This document details the test plans, test cases, and verification strategies fo
 | **REQ-014** | WebSocket Outbound Priority Scheduler | `TC-SCH-001`, `TC-SCH-002`, `TC-SCH-003`, `TC-SCH-004`, `TC-SCH-005`, `TC-SCH-006`, `TC-INT-004`, `TC-NET-020`, `TC-NET-021` |
 | **REQ-015** | State Coalescer & Telemetry Ring Buffer | `TC-BUF-001`, `TC-BUF-002`, `TC-BUF-007` |
 | **REQ-016** | NATS Security & Target Isolation | `TC-SEC-001` |
-| **REQ-017** | Local Management Signal Security | `TC-NET-005`, `TC-NET-011` |
+| **REQ-017** | (Removed) Local Management Signal Security | `(Removed)` |
 | **REQ-018** | Audit Logging & Loop Prevention | `TC-NET-006`, `TC-NET-011` |
 | **REQ-019** | NATS-Native Health Reporting | `TC-NET-007` |
 | **REQ-020** | Sizing Constraints | `TC-CON-004`, `TC-NET-019` |
 | **REQ-021** | JSON-RPC Error Mapping | `TC-CON-002`, `TC-QUE-002`, `TC-INT-002` |
-| **REQ-022** | Capability Caching & Lifecycle | `TC-NET-008`, `TC-NET-012` |
+| **REQ-022** | Capability Caching & Lifecycle | `TC-NET-008` |
 | **REQ-023** | TLS v1.3 Security | `TC-SEC-002` |
 | **REQ-024** | Payload Compression | `TC-BUF-004` |
 | **REQ-025** | Request Manager Retry Policy | `TC-RM-006` |

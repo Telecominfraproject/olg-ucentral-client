@@ -29,16 +29,17 @@ func TestCapabilityCache_LoadFromDisk_Success(t *testing.T) {
 	}
 	tmpFile.Close()
 
-	cache := NewCapabilityCache(tmpFile.Name())
-	data, fwStr, err := cache.LoadFromDisk(tmpFile.Name())
+	cache, err := NewCapabilityCache(tmpFile.Name())
 	if err != nil {
-		t.Fatalf("LoadFromDisk failed: %v", err)
+		t.Fatalf("NewCapabilityCache failed: %v", err)
 	}
 
+	data, _ := cache.GetCapabilities()
 	if len(data) == 0 {
-		t.Error("Expected non-empty data from LoadFromDisk")
+		t.Error("Expected non-empty data from cache")
 	}
 
+	fwStr, _ := cache.GetFirmware()
 	if fwStr != "3.2.0" {
 		t.Errorf("Expected firmware 3.2.0, got %s", fwStr)
 	}
@@ -56,8 +57,7 @@ func TestCapabilityCache_LoadFromDisk_InvalidJSON(t *testing.T) {
 	}
 	tmpFile.Close()
 
-	cache := NewCapabilityCache(tmpFile.Name())
-	_, _, err = cache.LoadFromDisk(tmpFile.Name())
+	_, err = NewCapabilityCache(tmpFile.Name())
 	if err == nil {
 		t.Error("Expected error for invalid JSON, got nil")
 	}
@@ -85,8 +85,7 @@ func TestCapabilityCache_InvalidFirmwareStructure(t *testing.T) {
 	}
 	tmpFile.Close()
 
-	cache := NewCapabilityCache(tmpFile.Name())
-	_, _, err = cache.LoadFromDisk(tmpFile.Name())
+	_, err = NewCapabilityCache(tmpFile.Name())
 	if err == nil {
 		t.Error("Expected error for invalid firmware structure, got nil")
 	}
@@ -115,8 +114,7 @@ func TestCapabilityCache_NonIntegerFirmware(t *testing.T) {
 	}
 	tmpFile.Close()
 
-	cache := NewCapabilityCache(tmpFile.Name())
-	_, _, err = cache.LoadFromDisk(tmpFile.Name())
+	_, err = NewCapabilityCache(tmpFile.Name())
 	if err == nil {
 		t.Error("Expected error for non-integer firmware fields, got nil")
 	}
@@ -145,14 +143,13 @@ func TestCapabilityCache_NegativeFirmware(t *testing.T) {
 	}
 	tmpFile.Close()
 
-	cache := NewCapabilityCache(tmpFile.Name())
-	_, _, err = cache.LoadFromDisk(tmpFile.Name())
+	_, err = NewCapabilityCache(tmpFile.Name())
 	if err == nil {
 		t.Error("Expected error for negative firmware fields, got nil")
 	}
 }
 
-func TestCapabilityCache_LazyLoad(t *testing.T) {
+func TestCapabilityCache_GetCapabilities_AfterInitialization(t *testing.T) {
 	mockJSON := `{
 		"version": {
 			"olg": {
@@ -174,7 +171,10 @@ func TestCapabilityCache_LazyLoad(t *testing.T) {
 	}
 	tmpFile.Close()
 
-	cache := NewCapabilityCache(tmpFile.Name())
+	cache, err := NewCapabilityCache(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("NewCapabilityCache failed: %v", err)
+	}
 
 	caps, err := cache.GetCapabilities()
 	if err != nil {
@@ -216,7 +216,10 @@ func TestCapabilityCache_Concurrency(t *testing.T) {
 	}
 	tmpFile.Close()
 
-	cache := NewCapabilityCache(tmpFile.Name())
+	cache, err := NewCapabilityCache(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("NewCapabilityCache failed: %v", err)
+	}
 
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
@@ -243,10 +246,9 @@ func TestCapabilityCache_Concurrency(t *testing.T) {
 }
 
 func TestCapabilityCache_MissingFile(t *testing.T) {
-	cache := NewCapabilityCache("does_not_exist_12345.json")
-	_, err := cache.GetCapabilities()
+	_, err := NewCapabilityCache("does_not_exist_12345.json")
 	if err == nil {
-		t.Error("Expected error when lazy loading a missing file, got nil")
+		t.Error("Expected error when initializing cache with missing file, got nil")
 	}
 }
 
@@ -273,7 +275,10 @@ func TestCapabilityCache_DefensiveCopy(t *testing.T) {
 	}
 	tmpFile.Close()
 
-	cache := NewCapabilityCache(tmpFile.Name())
+	cache, err := NewCapabilityCache(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("NewCapabilityCache failed: %v", err)
+	}
 
 	caps1, err := cache.GetCapabilities()
 	if err != nil {
